@@ -14,8 +14,8 @@ env:
   ECR_REGISTRY: 569476542351.dkr.ecr.ap-south-1.amazonaws.com
   ECS_CLUSTER: microservices-cluster
   ECS_SERVICE: user-service
-  TASKDEF_TEMPLATE: ecs/taskdef-user.json
-  TASKDEF_RENDERED: ecs/taskdef-rendered.json
+  TASKDEF_TEMPLATE: taskdef-user.json
+  TASKDEF_RENDERED: taskdef-rendered.json
 
 jobs:
   build-and-deploy:
