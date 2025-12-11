@@ -1,0 +1,14 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowPassEcsRoles",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": [
+        "arn:aws:iam::569476542351:role/ecsTaskRole",
+        "arn:aws:iam::569476542351:role/ecsTaskExecutionRole"
+      ]
+    }
+  ]
+}
