@@ -1,0 +1,184 @@
+name: CI-CD -> ECR & ECS (build, push, deploy, smoke-test)
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: write 
+  actions: read
+
+env:
+  AWS_REGION: ap-south-1
+  ECR_REGISTRY: 569476542351.dkr.ecr.ap-south-1.amazonaws.com
+  ECS_CLUSTER: microservices-cluster
+  ECS_SERVICE: user-service
+  TASKDEF_TEMPLATE: ecs/taskdef-user.json
+  TASKDEF_RENDERED: ecs/taskdef-rendered.json
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: ci-cd-ecs-${{ github.ref }}
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (for tests, build)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies & run tests for user-service
+        working-directory: ./user-service
+        run: |
+          npm ci
+          npm test || (echo "Tests failed in user-service" && exit 1)
+
+      # If you have product-service, repeat tests step for it
+      # - name: Install dependencies & run tests for product-service
+      #   working-directory: ./product-service
+      #   run: |
+      #     npm ci
+      #     npm test || (echo "Tests failed in product-service" && exit 1)
+
+      - name: Configure AWS credentials (OIDC preferred, fall back to secrets)
+        # This step supports two modes:
+        # 1) GitHub OIDC (recommended) — create an IAM role and configure trust for GitHub OIDC and set role_arn in the repo secrets as GITHUB_OIDC_ROLE_ARN
+        # 2) long-lived AWS creds — set secrets AWS_ACCESS_KEY_ID & AWS_SECRET_ACCESS_KEY
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          # If you use OIDC, set OIDC_ROLE_ARN secret to the role to assume; otherwise omit role-to-assume and rely on AWS_* secrets
+          role-to-assume: ${{ secrets.OIDC_ROLE_ARN || '' }}
+          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID || '' }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY || '' }}
+
+      - name: Login to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REGISTRY
+
+      - name: Build Docker image (user-service) and push to ECR (sha + latest)
+        id: docker_user
+        working-directory: ./user-service
+        env:
+          ECR_REGISTRY: ${{ env.ECR_REGISTRY }}
+        run: |
+          IMAGE_NAME=user-service
+          IMAGE_TAG=${GITHUB_SHA::8}
+          IMAGE_URI=${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+          LATEST_URI=${ECR_REGISTRY}/${IMAGE_NAME}:latest
+
+          # build
+          docker build -t ${IMAGE_NAME}:${IMAGE_TAG} .
+
+          # tag
+          docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${IMAGE_URI}
+          docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${LATEST_URI}
+
+          # push
+          docker push ${IMAGE_URI}
+          docker push ${LATEST_URI}
+
+          echo "IMAGE_URI=${IMAGE_URI}" >> $GITHUB_OUTPUT
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "LATEST_URI=${LATEST_URI}" >> $GITHUB_OUTPUT
+
+      # If you have product-service, add a similar build/push step and capture its outputs
+
+      - name: Prepare ECS task definition (render image)
+        id: render_taskdef
+        run: |
+          set -euo pipefail
+          TEMPLATE=${{ env.TASKDEF_TEMPLATE }}
+          RENDERED=${{ env.TASKDEF_RENDERED }}
+
+          # required values from previous step
+          IMAGE_URI="${{ steps.docker_user.outputs.IMAGE_URI }}"
+
+          # make sure template exists
+          if [ ! -f "$TEMPLATE" ]; then
+            echo "Task definition template $TEMPLATE not found."
+            exit 1
+          fi
+
+          # The template should contain a unique placeholder like "__IMAGE__" (example below).
+          # Replace it with the built image URI and produce a new JSON file to register.
+          jq --arg img "$IMAGE_URI" '(.containerDefinitions[] | select(.name=="user") | .image) |= $img' "$TEMPLATE" > "$RENDERED"
+
+          echo "Wrote rendered taskdef to $RENDERED"
+          cat "$RENDERED" | jq -C .
+
+      - name: Register ECS task definition
+        id: register_td
+        run: |
+          set -euo pipefail
+          RENDERED=${{ env.TASKDEF_RENDERED }}
+          aws ecs register-task-definition --cli-input-json file://$RENDERED --region ${{ env.AWS_REGION }} > /tmp/td.json
+          TD_ARN=$(jq -r '.taskDefinition.taskDefinitionArn' /tmp/td.json)
+          echo "task_definition_arn=$TD_ARN" >> $GITHUB_OUTPUT
+          echo "Registered task definition: $TD_ARN"
+        env:
+          AWS_REGION: ${{ env.AWS_REGION }}
+
+      - name: Deploy to ECS (update service -> rolling deploy)
+        id: deploy
+        run: |
+          set -euo pipefail
+          CLUSTER=${{ env.ECS_CLUSTER }}
+          SERVICE=${{ env.ECS_SERVICE }}
+          TD_ARN=${{ steps.register_td.outputs.task_definition_arn || steps.register_td.outputs.task_definition_arn }}
+
+          # if register step exported TD ARN to file, try to read it
+          if [ -z "${TD_ARN}" ]; then
+            TD_ARN=$(cat /tmp/td.json | jq -r '.taskDefinition.taskDefinitionArn')
+          fi
+
+          echo "Updating service $SERVICE on cluster $CLUSTER to use $TD_ARN"
+          aws ecs update-service --cluster $CLUSTER --service $SERVICE --task-definition "$TD_ARN" --region ${{ env.AWS_REGION }}
+
+      - name: Wait for deployment stability
+        run: |
+          set -euo pipefail
+          CLUSTER=${{ env.ECS_CLUSTER }}
+          SERVICE=${{ env.ECS_SERVICE }}
+          REGION=${{ env.AWS_REGION }}
+
+          echo "Waiting for service to be stable (max 10 minutes)"
+          aws ecs wait services-stable --cluster "$CLUSTER" --services "$SERVICE" --region "$REGION"
+          echo "Service is stable (or aws wait succeeded)."
+
+      - name: Smoke test (HTTP health check)
+        id: smoke
+        env:
+          HEALTH_URL: ${{ secrets.SMOKE_HEALTH_URL || '' }} # e.g. http://my-alb-dns/health
+        run: |
+          set -euo pipefail
+          if [ -z "$HEALTH_URL" ]; then
+            echo "SMOKE_HEALTH_URL not set in secrets. Skipping HTTP health check. You can set this to your ALB DNS or a public endpoint."
+            exit 0
+          fi
+
+          echo "Testing $HEALTH_URL (10 tries)"
+          for i in $(seq 1 10); do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$HEALTH_URL" || true)
+            echo "Attempt $i -> HTTP $status"
+            if [ "$status" = "200" ]; then
+              echo "Health check passed"
+              exit 0
+            fi
+            sleep 6
+          done
+
+          echo "Health check FAILED"
+          # fetch ECS service events for debugging
+          aws ecs describe-services --cluster ${{ env.ECS_CLUSTER }} --services ${{ env.ECS_SERVICE }} --region ${{ env.AWS_REGION }} --query "services[0].events" --output json
+          exit 1
