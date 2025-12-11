@@ -34,7 +34,7 @@ jobs:
           node-version: '18'
 
       - name: Install & run tests (user-service)
-        working-directory: ./user-service
+        working-directory: ./
         run: |
           npm ci
           npm test || (echo "Tests failed in user-service" && exit 1)
