@@ -1,0 +1,44 @@
+{
+  "family": "user-service",
+  "networkMode": "awsvpc",
+  "executionRoleArn": "arn:aws:iam::569476542351:role/ecsTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::569476542351:role/ecsTaskRole",
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "256",
+  "memory": "512",
+  "containerDefinitions": [
+    {
+      "name": "user",
+      "image": "569476542351.dkr.ecr.ap-south-1.amazonaws.com/user-service:abcdef12",
+      "essential": true,
+      "portMappings": [
+        {
+          "containerPort": 3000,
+          "protocol": "tcp"
+        }
+      ],
+      "environment": [
+        {
+          "name": "SOME_ENV",
+          "value": "value"
+        }
+      ],
+      "secrets": [
+        {
+          "name": "DB_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:ap-south-1:569476542351:secret:my-db-secret:password::"
+        }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/user-service",
+          "awslogs-region": "ap-south-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      }
+    }
+  ]
+}
