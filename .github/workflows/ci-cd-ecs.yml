@@ -3,7 +3,7 @@ name: CI -> Build Docker, Push to ECR, Deploy to ECS
 on:
   push:
     branches:
-      - main
+      - dev
 
 permissions:
   contents: read
