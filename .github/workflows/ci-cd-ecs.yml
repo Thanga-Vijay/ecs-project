@@ -42,10 +42,11 @@ jobs:
       - name: Configure AWS credentials (OIDC preferred, fallback to secrets)
         uses: aws-actions/configure-aws-credentials@v2
         with:
-          role-to-assume: ${{ secrets.OIDC_ROLE_ARN || '' }}
+          # ole-to-assume: ${{ secrets.OIDC_ROLE_ARN || '' }}
+          role-to-assume: arn:aws:iam::569476542351:role/GithubRole
           aws-region: ${{ env.AWS_REGION }}
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID || '' }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY || '' }}
+          # aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID || '' }}
+          # aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY || '' }}
 
       - name: Login to ECR
         env:
